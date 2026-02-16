@@ -62,32 +62,130 @@ class CandidateNumber:
     context: str = ""  # surrounding text snippet
 
 
-def extract_pages(pdf_path: str) -> list[tuple[int, str, list[str]]]:
+# Financial keywords that indicate a row contains monetary values
+FINANCIAL_KEYWORDS = {
+    'revenue', 'cost', 'budget', 'appropriation', 'expense', 'spending',
+    'income', 'profit', 'loss', 'price', 'fee', 'payment', 'debt',
+    'investment', 'funding', 'allocation', 'obligation', 'outlay',
+    'dollar', '$', 'sales', 'earnings', 'capital', 'liability', 'asset',
+    'expenditure', 'receipt', 'surplus', 'deficit', 'balance'
+}
+
+
+@dataclass
+class TableRow:
+    """Represents a table row with spatial and content information."""
+    text: str  # Full row text
+    label: str  # Row label (first cell)
+    values: list[str]  # Data values (remaining cells)
+    indent_level: float  # X-coordinate of leftmost text (for indentation detection)
+    is_financial: bool = False  # Whether this row contains financial data
+
+
+def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
     """
     Extract text and tables from each page of a PDF.
 
-    Returns a list of (page_number, body_text, table_texts) tuples.
-    page_number is 1-indexed. table_texts is a list of text strings,
-    one per table found on the page.
+    Returns a list of (page_number, body_text, tables) tuples.
+    page_number is 1-indexed. tables is a list of TableRow lists.
     """
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
-            table_texts = []
+            tables = []
             try:
-                raw_tables = page.extract_tables() or []
+                # Use more aggressive table detection settings
+                table_settings = {
+                    "vertical_strategy": "text",  # Detect columns by text alignment
+                    "horizontal_strategy": "text",  # Detect rows by text alignment
+                    "intersection_tolerance": 3,
+                }
+                raw_tables = page.extract_tables(table_settings) or []
             except Exception:
-                raw_tables = []
+                # Fallback to default if settings fail
+                try:
+                    raw_tables = page.extract_tables() or []
+                except Exception:
+                    raw_tables = []
+
             for table in raw_tables:
-                rows = []
+                if not table:
+                    continue
+
+                # Extract table with spatial information
+                table_rows = []
                 for row in table:
-                    if row:
-                        rows.append(" ".join(cell or "" for cell in row))
-                if rows:
-                    table_texts.append("\n".join(rows))
-            pages.append((i, text, table_texts))
+                    if not row or not any(cell and cell.strip() for cell in row):
+                        continue
+
+                    # First cell is typically the row label
+                    label = (row[0] or "").strip()
+                    values = [cell.strip() if cell else "" for cell in row[1:]]
+
+                    # Get indent level by analyzing the label text position
+                    # We'll use a simple heuristic: count leading spaces
+                    indent_level = len(label) - len(label.lstrip())
+
+                    table_rows.append(TableRow(
+                        text=" ".join(cell or "" for cell in row),
+                        label=label,
+                        values=values,
+                        indent_level=indent_level,
+                        is_financial=False  # Will be determined later
+                    ))
+
+                if table_rows:
+                    # Determine which rows are financial based on hierarchy
+                    mark_financial_rows(table_rows)
+                    tables.append(table_rows)
+
+            pages.append((i, text, tables))
     return pages
+
+
+def has_financial_keyword(text: str) -> bool:
+    """Check if text contains any financial keywords."""
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in FINANCIAL_KEYWORDS)
+
+
+def mark_financial_rows(rows: list[TableRow]) -> None:
+    """
+    Mark rows as financial based on indentation hierarchy.
+
+    Rules:
+    1. If a row has financial keywords, it's financial
+    2. If a row is indented under a financial row, it's financial
+    3. Non-indented rows without financial keywords reset the context
+    """
+    if not rows:
+        return
+
+    # Track the current financial context with indent level
+    financial_context_stack = []  # List of (indent_level, is_financial) tuples
+
+    for row in rows:
+        # Check if this row has explicit financial keywords
+        has_fin_keyword = has_financial_keyword(row.label)
+
+        # Pop context stack if we've outdented (returned to a shallower level)
+        while financial_context_stack and financial_context_stack[-1][0] >= row.indent_level:
+            financial_context_stack.pop()
+
+        # Determine if this row is financial
+        if has_fin_keyword:
+            # Explicitly financial
+            row.is_financial = True
+            financial_context_stack.append((row.indent_level, True))
+        elif financial_context_stack and financial_context_stack[-1][1]:
+            # Indented under a financial row - inherit financial context
+            row.is_financial = True
+            financial_context_stack.append((row.indent_level, True))
+        else:
+            # Not financial
+            row.is_financial = False
+            financial_context_stack.append((row.indent_level, False))
 
 
 def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
@@ -292,16 +390,34 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
 
     all_candidates = []
 
-    for page_num, body_text, table_texts in pages:
-        # Process each table separately with its own qualifier
-        for table_text in table_texts:
-            if not table_text.strip():
-                continue
+    for page_num, body_text, tables in pages:
+        # Process each table using spatial hierarchy
+        for table_rows in tables:
+            # Detect table-level qualifier
+            table_text = "\n".join(row.text for row in table_rows)
             t_mult, t_label, t_dollar = detect_page_qualifier(table_text)
-            all_candidates.extend(
-                extract_numbers(table_text, page_num, t_mult, t_label, t_dollar)
-            )
 
+            # Process each row
+            for row in table_rows:
+                # Only apply multiplier if row is marked as financial
+                if row.is_financial and t_dollar:
+                    # Financial row - apply multiplier
+                    row_candidates = extract_numbers(
+                        row.text, page_num, t_mult, t_label, is_dollar_scoped=False
+                    )
+                elif not t_dollar:
+                    # Non-dollar-scoped qualifier (like plain "in millions") - apply to all
+                    row_candidates = extract_numbers(
+                        row.text, page_num, t_mult, t_label, is_dollar_scoped=False
+                    )
+                else:
+                    # Dollar-scoped but not financial row - no multiplier
+                    row_candidates = extract_numbers(
+                        row.text, page_num, 1.0, "", is_dollar_scoped=False
+                    )
+                all_candidates.extend(row_candidates)
+
+        # Process body text with positional qualifiers
         if body_text.strip():
             qualifiers = detect_all_qualifiers(body_text)
             all_candidates.extend(
