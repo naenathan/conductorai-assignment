@@ -14,7 +14,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz
 import pdfplumber
 
 # Single source of truth for multiplier words and their values
@@ -168,7 +167,6 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
 
 
 def has_financial_keyword(text: str) -> bool:
-    """Check if text contains any financial keywords."""
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in FINANCIAL_KEYWORDS)
 
@@ -180,6 +178,8 @@ def mark_financial_rows(rows: list[TableRow]) -> None:
     - Rows with financial keywords are financial
     - Rows indented under financial rows inherit financial status
     - Non-indented rows without financial keywords reset the context
+
+    This logic is needed to make the code more robust against a different document, the White House 2025 budget.
     """
     if not rows:
         return
@@ -202,21 +202,6 @@ def mark_financial_rows(rows: list[TableRow]) -> None:
         else:
             row.is_financial = False
             financial_context_stack.append((row.indent_level, False))
-
-
-def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
-    """
-    Fallback extraction using PyMuPDF for pages that yielded no text.
-    Returns {page_number: text}.
-    """
-    results = {}
-    doc = fitz.open(pdf_path)
-    for pn in page_numbers:
-        idx = pn - 1
-        if 0 <= idx < len(doc):
-            results[pn] = doc[idx].get_text() or ""
-    doc.close()
-    return results
 
 
 def get_context_snippet(text: str, start: int, end: int, window: int = CONTEXT_WINDOW_CHARS) -> str:
@@ -271,11 +256,9 @@ def extract_numbers(
         except ValueError:
             continue
 
-        # Handle parenthesized negatives
         if open_paren and close_paren:
             value = -value
 
-        # Determine multiplier
         is_percent = bool(percent)
 
         if inline_mult_str:
@@ -284,7 +267,6 @@ def extract_numbers(
             # Percentages don't get page-level multiplier
             mult_val, mult_label = 1.0, ""
         else:
-            # Use positional or fallback qualifier
             if qualifiers:
                 mult_val, mult_label, qual_dollar_scoped = get_nearest_qualifier(
                     match.start(2), qualifiers
@@ -294,7 +276,6 @@ def extract_numbers(
                 mult_label = page_mult_label
                 qual_dollar_scoped = is_dollar_scoped
 
-            # If qualifier is dollar-scoped and this is a whole integer, don't apply multiplier
             if qual_dollar_scoped and "." not in num_str:
                 mult_val, mult_label = 1.0, ""
 
@@ -366,15 +347,6 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
     Returns (max_raw_candidate, max_adjusted_candidate).
     """
     pages = extract_pages(pdf_path)
-
-    # Identify empty pages for fallback
-    empty_pages = [pn for pn, text, _ in pages if not text.strip()]
-    if empty_pages:
-        fallback = try_fitz_fallback(pdf_path, empty_pages)
-        pages = [
-            (pn, fallback.get(pn, text) if not text.strip() else text, table_texts)
-            for pn, text, table_texts in pages
-        ]
 
     all_candidates = []
 
