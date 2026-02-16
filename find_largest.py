@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import fitz
 import pdfplumber
 
 
@@ -29,8 +30,11 @@ MULTIPLIERS = {
     "trillions": 1_000_000_000_000,
 }
 
-_inline_mult_words = "|".join(MULTIPLIERS.keys())
-_qualifier_mult_words = "|".join(w for w in MULTIPLIERS.keys() if w.endswith("s"))
+_INLINE_MULT_WORDS = "|".join(MULTIPLIERS.keys())
+_QUALIFIER_MULT_WORDS = "|".join(w for w in MULTIPLIERS.keys() if w.endswith("s"))
+
+CONTEXT_WINDOW_CHARS = 60
+TABLE_INTERSECTION_TOLERANCE = 3
 
 # Pattern for inline numbers with optional currency, commas, decimals,
 # parenthesized negatives, and optional inline multiplier suffix.
@@ -41,13 +45,13 @@ NUMBER_PATTERN = re.compile(
     r"(?:"
     r"\s*(%)"                                 # group 4: percent sign
     r"|"
-    rf"\s+({_inline_mult_words})"            # group 5: word multiplier (requires space)
+    rf"\s+({_INLINE_MULT_WORDS})"            # group 5: word multiplier (requires space)
     r"(?![a-zA-Z])"
     r")?"
 )
 
 QUALIFIER_PATTERN = re.compile(
-    rf"\(?\s*(\$|dollars?)?\s*(?:amounts\s+)?in\s+({_qualifier_mult_words})"
+    rf"\(?\s*(\$|dollars?)?\s*(?:amounts\s+)?in\s+({_QUALIFIER_MULT_WORDS})"
     r"(?:\s+of\s+dollars?)?\s*\)?",
     re.IGNORECASE,
 )
@@ -64,22 +68,22 @@ class CandidateNumber:
 
 # Financial keywords that indicate a row contains monetary values
 FINANCIAL_KEYWORDS = {
-    'revenue', 'cost', 'budget', 'appropriation', 'expense', 'spending',
-    'income', 'profit', 'loss', 'price', 'fee', 'payment', 'debt',
-    'investment', 'funding', 'allocation', 'obligation', 'outlay',
-    'dollar', '$', 'sales', 'earnings', 'capital', 'liability', 'asset',
-    'expenditure', 'receipt', 'surplus', 'deficit', 'balance'
+    '$', 'allocation', 'appropriation', 'asset', 'balance', 'budget',
+    'capital', 'cost', 'debt', 'deficit', 'dollar', 'earnings', 'expenditure',
+    'expense', 'fee', 'funding', 'income', 'investment', 'liability', 'loss',
+    'obligation', 'outlay', 'payment', 'price', 'profit', 'receipt', 'revenue',
+    'sales', 'spending', 'surplus',
 }
 
 
 @dataclass
 class TableRow:
     """Represents a table row with spatial and content information."""
-    text: str  # Full row text
-    label: str  # Row label (first cell)
-    values: list[str]  # Data values (remaining cells)
-    indent_level: float  # X-coordinate of leftmost text (for indentation detection)
-    is_financial: bool = False  # Whether this row contains financial data
+    text: str
+    label: str
+    values: list[str]
+    indent_level: int  # Leading whitespace count in label (for indentation hierarchy)
+    is_financial: bool = False
 
 
 def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
@@ -96,15 +100,15 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
             tables = []
             try:
                 table_settings = {
-                    "vertical_strategy": "text",  # Detect columns by text alignment
-                    "horizontal_strategy": "text",  # Detect rows by text alignment
-                    "intersection_tolerance": 3,
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                    "intersection_tolerance": TABLE_INTERSECTION_TOLERANCE,
                 }
                 raw_tables = page.extract_tables(table_settings) or []
-            except Exception:
+            except (AttributeError, ValueError, KeyError):
                 try:
                     raw_tables = page.extract_tables() or []
-                except Exception:
+                except (AttributeError, ValueError):
                     raw_tables = []
 
             for table in raw_tables:
@@ -118,7 +122,7 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
 
                     label = (row[0] or "").strip()
                     values = [cell.strip() if cell else "" for cell in row[1:]]
-                    indent_level = len(label) - len(label.lstrip())  # Count leading spaces
+                    indent_level = len(label) - len(label.lstrip())
 
                     table_rows.append(TableRow(
                         text=" ".join(cell or "" for cell in row),
@@ -179,20 +183,16 @@ def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
     Returns {page_number: text}.
     """
     results = {}
-    try:
-        import fitz
-        doc = fitz.open(pdf_path)
-        for pn in page_numbers:
-            idx = pn - 1
-            if 0 <= idx < len(doc):
-                results[pn] = doc[idx].get_text() or ""
-        doc.close()
-    except ImportError:
-        pass
+    doc = fitz.open(pdf_path)
+    for pn in page_numbers:
+        idx = pn - 1
+        if 0 <= idx < len(doc):
+            results[pn] = doc[idx].get_text() or ""
+    doc.close()
     return results
 
 
-def get_context_snippet(text: str, start: int, end: int, window: int = 60) -> str:
+def get_context_snippet(text: str, start: int, end: int, window: int = CONTEXT_WINDOW_CHARS) -> str:
     """Extract a snippet of text around the match for display."""
     ctx_start = max(0, start - window)
     ctx_end = min(len(text), end + window)
