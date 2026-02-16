@@ -1,0 +1,15 @@
+[project]
+name = "conductorai"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]  # Errors, pyflakes, import sorting
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.1",
+]

@@ -17,7 +17,6 @@ from pathlib import Path
 import fitz
 import pdfplumber
 
-
 # Single source of truth for multiplier words and their values
 MULTIPLIERS = {
     "thousand": 1_000,
@@ -39,13 +38,13 @@ TABLE_INTERSECTION_TOLERANCE = 3
 # Pattern for inline numbers with optional currency, commas, decimals,
 # parenthesized negatives, and optional inline multiplier suffix.
 NUMBER_PATTERN = re.compile(
-    r"(\()?"                                  # group 1: open paren (negative)
+    r"(\()?"  # group 1: open paren (negative)
     r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"  # group 2: number
-    r"(\))?"                                  # group 3: close paren
+    r"(\))?"  # group 3: close paren
     r"(?:"
-    r"\s*(%)"                                 # group 4: percent sign
+    r"\s*(%)"  # group 4: percent sign
     r"|"
-    rf"\s+({_INLINE_MULT_WORDS})"            # group 5: word multiplier (requires space)
+    rf"\s+({_INLINE_MULT_WORDS})"  # group 5: word multiplier (requires space)
     r"(?![a-zA-Z])"
     r")?"
 )
@@ -68,17 +67,43 @@ class CandidateNumber:
 
 # Financial keywords that indicate a row contains monetary values
 FINANCIAL_KEYWORDS = {
-    '$', 'allocation', 'appropriation', 'asset', 'balance', 'budget',
-    'capital', 'cost', 'debt', 'deficit', 'dollar', 'earnings', 'expenditure',
-    'expense', 'fee', 'funding', 'income', 'investment', 'liability', 'loss',
-    'obligation', 'outlay', 'payment', 'price', 'profit', 'receipt', 'revenue',
-    'sales', 'spending', 'surplus',
+    "$",
+    "allocation",
+    "appropriation",
+    "asset",
+    "balance",
+    "budget",
+    "capital",
+    "cost",
+    "debt",
+    "deficit",
+    "dollar",
+    "earnings",
+    "expenditure",
+    "expense",
+    "fee",
+    "funding",
+    "income",
+    "investment",
+    "liability",
+    "loss",
+    "obligation",
+    "outlay",
+    "payment",
+    "price",
+    "profit",
+    "receipt",
+    "revenue",
+    "sales",
+    "spending",
+    "surplus",
 }
 
 
 @dataclass
 class TableRow:
     """Represents a table row with spatial and content information."""
+
     text: str
     label: str
     values: list[str]
@@ -124,13 +149,15 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
                     values = [cell.strip() if cell else "" for cell in row[1:]]
                     indent_level = len(label) - len(label.lstrip())
 
-                    table_rows.append(TableRow(
-                        text=" ".join(cell or "" for cell in row),
-                        label=label,
-                        values=values,
-                        indent_level=indent_level,
-                        is_financial=False
-                    ))
+                    table_rows.append(
+                        TableRow(
+                            text=" ".join(cell or "" for cell in row),
+                            label=label,
+                            values=values,
+                            indent_level=indent_level,
+                            is_financial=False,
+                        )
+                    )
 
                 if table_rows:
                     mark_financial_rows(table_rows)
@@ -274,13 +301,15 @@ def extract_numbers(
         adjusted = value * mult_val
         context = get_context_snippet(text, match.start(), match.end())
 
-        candidates.append(CandidateNumber(
-            raw_value=value,
-            adjusted_value=adjusted,
-            multiplier_label=mult_label or "1x",
-            page=page_num,
-            context=context,
-        ))
+        candidates.append(
+            CandidateNumber(
+                raw_value=value,
+                adjusted_value=adjusted,
+                multiplier_label=mult_label or "1x",
+                page=page_num,
+                context=context,
+            )
+        )
 
     return candidates
 
@@ -371,9 +400,7 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
 
         if body_text.strip():
             qualifiers = detect_all_qualifiers(body_text)
-            all_candidates.extend(
-                extract_numbers(body_text, page_num, qualifiers=qualifiers)
-            )
+            all_candidates.extend(extract_numbers(body_text, page_num, qualifiers=qualifiers))
 
     if not all_candidates:
         return None, None
