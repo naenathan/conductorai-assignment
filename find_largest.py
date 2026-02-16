@@ -63,8 +63,6 @@ QUALIFIER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-PHONE_PATTERN = re.compile(r"\(?\d{3}\)?[\s\-\.]\d{3}[\s\-\.]\d{4}")
-
 QUALIFIER_WORD_TO_MULT = {
     "thousands": 1_000,
     "millions": 1_000_000,
@@ -141,13 +139,6 @@ def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
 # Number Extraction
 # ---------------------------------------------------------------------------
 
-def is_phone_number(full_text: str, match_start: int, match_end: int) -> bool:
-    """Check if this number is part of a phone number."""
-    window_start = max(0, match_start - 20)
-    window_end = min(len(full_text), match_end + 20)
-    window = full_text[window_start:window_end]
-    return bool(PHONE_PATTERN.search(window))
-
 def get_context_snippet(text: str, start: int, end: int, window: int = 60) -> str:
     """Extract a snippet of text around the match for display."""
     ctx_start = max(0, start - window)
@@ -193,10 +184,6 @@ def extract_numbers(
         close_paren = match.group(3)
         percent = match.group(4)
         inline_mult_str = match.group(5)
-
-        # Skip phone numbers
-        if is_phone_number(text, match.start(), match.end()):
-            continue
 
         # Parse the numeric value
         cleaned = num_str.replace(",", "")
