@@ -17,7 +17,6 @@ from pathlib import Path
 import pdfplumber
 
 
-# Single source of truth for multiplier words and their values
 MULTIPLIERS = {
     "thousand": 1_000,
     "thousands": 1_000,
@@ -30,7 +29,7 @@ MULTIPLIERS = {
 }
 
 _inline_mult_words = "|".join(MULTIPLIERS.keys())
-_qualifier_mult_words = "|".join(w for w in MULTIPLIERS.keys() if w.endswith("s"))
+_qualifier_mult_words = "|".join(MULTIPLIERS.keys())
 
 # Pattern for inline numbers with optional currency, commas, decimals,
 # parenthesized negatives, and optional inline multiplier suffix.
@@ -147,8 +146,7 @@ def extract_numbers(
     page_num: int,
     page_multiplier: float = 1.0,
     page_mult_label: str = "",
-    is_dollar_scoped: bool = False,
-    qualifiers: list[tuple[int, float, str, bool]] | None = None,
+    qualifiers: list[tuple[int, float, str]] | None = None,
 ) -> list[CandidateNumber]:
     """
     Extract all candidate numbers from a text segment.
@@ -158,12 +156,10 @@ def extract_numbers(
         page_num: Page number for tracking where the number was found
         page_multiplier: Fallback multiplier if qualifiers list is not provided
         page_mult_label: Fallback label if qualifiers list is not provided
-        is_dollar_scoped: If True, only apply the multiplier to numbers with decimals
         qualifiers: List of tuples for positional lookup. Each tuple contains:
             - position (int): Start index of the qualifier in the text
             - multiplier (float): The multiplier value (e.g., 1000000 for "millions")
             - label (str): The label string (e.g., "millions")
-            - is_dollar_scoped (bool): Whether this qualifier only applies to dollar amounts
 
     Returns:
         List of CandidateNumber objects found in the text.
@@ -199,17 +195,10 @@ def extract_numbers(
         else:
             # Use positional or fallback qualifier
             if qualifiers:
-                mult_val, mult_label, qual_dollar_scoped = get_nearest_qualifier(
-                    match.start(2), qualifiers
-                )
+                mult_val, mult_label = get_nearest_qualifier(match.start(2), qualifiers)
             else:
                 mult_val = page_multiplier
                 mult_label = page_mult_label
-                qual_dollar_scoped = is_dollar_scoped
-
-            # If qualifier is dollar-scoped and this is a whole integer, don't apply multiplier
-            if qual_dollar_scoped and "." not in num_str:
-                mult_val, mult_label = 1.0, ""
 
         adjusted = value * mult_val
         context = get_context_snippet(text, match.start(), match.end())
@@ -225,52 +214,33 @@ def extract_numbers(
     return candidates
 
 
-def detect_all_qualifiers(text: str) -> list[tuple[int, float, str, bool]]:
+def detect_all_qualifiers(text: str) -> list[tuple[int, float, str]]:
     """
-    Find all qualifiers in text and return (position, multiplier, label, is_dollar_scoped).
+    Find all qualifiers in text and return (position, multiplier, label).
     Position is the start index of the qualifier match.
     """
     qualifiers = []
     for match in QUALIFIER_PATTERN.finditer(text):
-        dollar_indicator = match.group(1)
         word = match.group(2).lower()
         mult = MULTIPLIERS.get(word, 1.0)
-        is_dollar_scoped = bool(dollar_indicator) or "dollar" in match.group(0).lower()
-        qualifiers.append((match.start(), float(mult), word, is_dollar_scoped))
+        qualifiers.append((match.start(), float(mult), word))
     return qualifiers
 
 
 def get_nearest_qualifier(
-    match_start: int, qualifiers: list[tuple[int, float, str, bool]]
-) -> tuple[float, str, bool]:
+    match_start: int, qualifiers: list[tuple[int, float, str]]
+) -> tuple[float, str]:
     """
     Find the nearest qualifier that appears before match_start.
-    Returns (multiplier, label, is_dollar_scoped).
+    Returns (multiplier, label).
     """
     # Filter to qualifiers that appear before the number
     preceding = [q for q in qualifiers if q[0] < match_start]
     if not preceding:
-        return 1.0, "", False
+        return 1.0, ""
     # Take the closest one (highest position)
-    _, mult, label, is_dollar_scoped = max(preceding, key=lambda q: q[0])
-    return mult, label, is_dollar_scoped
-
-
-def detect_page_qualifier(text: str) -> tuple[float, str, bool]:
-    """
-    Detect a section/table qualifier, e.g. "(in millions)" or "(Dollars in Millions)".
-
-    Returns (multiplier_value, label_string, is_dollar_scoped).
-    is_dollar_scoped is True when the qualifier explicitly references dollars,
-    meaning the multiplier should only apply to dollar amounts (numbers with decimals).
-
-    This is a convenience wrapper that returns the first qualifier found.
-    """
-    qualifiers = detect_all_qualifiers(text)
-    if qualifiers:
-        _, mult, label, is_dollar_scoped = qualifiers[0]
-        return mult, label, is_dollar_scoped
-    return 1.0, "", False
+    _, mult, label = max(preceding, key=lambda q: q[0])
+    return mult, label
 
 
 def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, CandidateNumber | None]:
@@ -297,9 +267,9 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
         for table_text in table_texts:
             if not table_text.strip():
                 continue
-            t_mult, t_label, t_dollar = detect_page_qualifier(table_text)
+            qualifiers = detect_all_qualifiers(table_text)
             all_candidates.extend(
-                extract_numbers(table_text, page_num, t_mult, t_label, t_dollar)
+                extract_numbers(table_text, page_num, qualifiers=qualifiers)
             )
 
         if body_text.strip():
