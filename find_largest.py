@@ -95,7 +95,6 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
             text = page.extract_text() or ""
             tables = []
             try:
-                # Use more aggressive table detection settings
                 table_settings = {
                     "vertical_strategy": "text",  # Detect columns by text alignment
                     "horizontal_strategy": "text",  # Detect rows by text alignment
@@ -103,7 +102,6 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
                 }
                 raw_tables = page.extract_tables(table_settings) or []
             except Exception:
-                # Fallback to default if settings fail
                 try:
                     raw_tables = page.extract_tables() or []
                 except Exception:
@@ -113,30 +111,24 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[list[TableRow]]]]:
                 if not table:
                     continue
 
-                # Extract table with spatial information
                 table_rows = []
                 for row in table:
                     if not row or not any(cell and cell.strip() for cell in row):
                         continue
 
-                    # First cell is typically the row label
                     label = (row[0] or "").strip()
                     values = [cell.strip() if cell else "" for cell in row[1:]]
-
-                    # Get indent level by analyzing the label text position
-                    # We'll use a simple heuristic: count leading spaces
-                    indent_level = len(label) - len(label.lstrip())
+                    indent_level = len(label) - len(label.lstrip())  # Count leading spaces
 
                     table_rows.append(TableRow(
                         text=" ".join(cell or "" for cell in row),
                         label=label,
                         values=values,
                         indent_level=indent_level,
-                        is_financial=False  # Will be determined later
+                        is_financial=False
                     ))
 
                 if table_rows:
-                    # Determine which rows are financial based on hierarchy
                     mark_financial_rows(table_rows)
                     tables.append(table_rows)
 
@@ -154,36 +146,29 @@ def mark_financial_rows(rows: list[TableRow]) -> None:
     """
     Mark rows as financial based on indentation hierarchy.
 
-    Rules:
-    1. If a row has financial keywords, it's financial
-    2. If a row is indented under a financial row, it's financial
-    3. Non-indented rows without financial keywords reset the context
+    - Rows with financial keywords are financial
+    - Rows indented under financial rows inherit financial status
+    - Non-indented rows without financial keywords reset the context
     """
     if not rows:
         return
 
-    # Track the current financial context with indent level
-    financial_context_stack = []  # List of (indent_level, is_financial) tuples
+    financial_context_stack = []  # (indent_level, is_financial) tuples
 
     for row in rows:
-        # Check if this row has explicit financial keywords
         has_fin_keyword = has_financial_keyword(row.label)
 
-        # Pop context stack if we've outdented (returned to a shallower level)
+        # Pop stack if we've outdented to a shallower level
         while financial_context_stack and financial_context_stack[-1][0] >= row.indent_level:
             financial_context_stack.pop()
 
-        # Determine if this row is financial
         if has_fin_keyword:
-            # Explicitly financial
             row.is_financial = True
             financial_context_stack.append((row.indent_level, True))
         elif financial_context_stack and financial_context_stack[-1][1]:
-            # Indented under a financial row - inherit financial context
             row.is_financial = True
             financial_context_stack.append((row.indent_level, True))
         else:
-            # Not financial
             row.is_financial = False
             financial_context_stack.append((row.indent_level, False))
 
@@ -208,18 +193,7 @@ def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
 
 
 def get_context_snippet(text: str, start: int, end: int, window: int = 60) -> str:
-    """
-    Extract a snippet of text around the match for display.
-
-    Args:
-        text: The full text to extract from
-        start: Start position of the match
-        end: End position of the match
-        window: Number of characters to include before and after the match (default: 60)
-
-    Returns:
-        A context snippet with ellipsis indicators if text was truncated.
-    """
+    """Extract a snippet of text around the match for display."""
     ctx_start = max(0, start - window)
     ctx_end = min(len(text), end + window)
     snippet = text[ctx_start:ctx_end].replace("\n", " ").strip()
@@ -249,22 +223,10 @@ def extract_numbers(
     qualifiers: list[tuple[int, float, str, bool]] | None = None,
 ) -> list[CandidateNumber]:
     """
-    Extract all candidate numbers from a text segment.
+    Extract all candidate numbers from text.
 
-    Args:
-        text: The text to search for numbers
-        page_num: Page number for tracking where the number was found
-        page_multiplier: Fallback multiplier if qualifiers list is not provided
-        page_mult_label: Fallback label if qualifiers list is not provided
-        is_dollar_scoped: If True, only apply the multiplier to numbers with decimals
-        qualifiers: List of tuples for positional lookup. Each tuple contains:
-            - position (int): Start index of the qualifier in the text
-            - multiplier (float): The multiplier value (e.g., 1000000 for "millions")
-            - label (str): The label string (e.g., "millions")
-            - is_dollar_scoped (bool): Whether this qualifier only applies to dollar amounts
-
-    Returns:
-        List of CandidateNumber objects found in the text.
+    qualifiers: List of (position, multiplier, label, is_dollar_scoped) tuples
+    is_dollar_scoped: Only apply multiplier to numbers with decimals
     """
     candidates = []
 
@@ -356,13 +318,10 @@ def get_nearest_qualifier(
 
 def detect_page_qualifier(text: str) -> tuple[float, str, bool]:
     """
-    Detect a section/table qualifier, e.g. "(in millions)" or "(Dollars in Millions)".
+    Detect a qualifier like "(in millions)" or "(Dollars in Millions)".
 
-    Returns (multiplier_value, label_string, is_dollar_scoped).
-    is_dollar_scoped is True when the qualifier explicitly references dollars,
-    meaning the multiplier should only apply to dollar amounts (numbers with decimals).
-
-    This is a convenience wrapper that returns the first qualifier found.
+    Returns (multiplier, label, is_dollar_scoped).
+    is_dollar_scoped: True when qualifier mentions dollars (only apply to financial rows).
     """
     qualifiers = detect_all_qualifiers(text)
     if qualifiers:
@@ -391,33 +350,25 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
     all_candidates = []
 
     for page_num, body_text, tables in pages:
-        # Process each table using spatial hierarchy
         for table_rows in tables:
-            # Detect table-level qualifier
             table_text = "\n".join(row.text for row in table_rows)
             t_mult, t_label, t_dollar = detect_page_qualifier(table_text)
 
-            # Process each row
             for row in table_rows:
-                # Only apply multiplier if row is marked as financial
                 if row.is_financial and t_dollar:
-                    # Financial row - apply multiplier
                     row_candidates = extract_numbers(
                         row.text, page_num, t_mult, t_label, is_dollar_scoped=False
                     )
                 elif not t_dollar:
-                    # Non-dollar-scoped qualifier (like plain "in millions") - apply to all
                     row_candidates = extract_numbers(
                         row.text, page_num, t_mult, t_label, is_dollar_scoped=False
                     )
                 else:
-                    # Dollar-scoped but not financial row - no multiplier
                     row_candidates = extract_numbers(
                         row.text, page_num, 1.0, "", is_dollar_scoped=False
                     )
                 all_candidates.extend(row_candidates)
 
-        # Process body text with positional qualifiers
         if body_text.strip():
             qualifiers = detect_all_qualifiers(body_text)
             all_candidates.extend(
