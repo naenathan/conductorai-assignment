@@ -11,7 +11,7 @@ Usage: python find_largest.py <path_to_pdf>
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pdfplumber
@@ -21,7 +21,8 @@ import pdfplumber
 # Constants
 # ---------------------------------------------------------------------------
 
-INLINE_MULTIPLIERS = {
+# Single source of truth for multiplier words and their values
+MULTIPLIERS = {
     "thousand": 1_000,
     "thousands": 1_000,
     "million": 1_000_000,
@@ -31,6 +32,10 @@ INLINE_MULTIPLIERS = {
     "trillion": 1_000_000_000_000,
     "trillions": 1_000_000_000_000,
 }
+
+# Build regex patterns dynamically from MULTIPLIERS
+_inline_mult_words = "|".join(MULTIPLIERS.keys())
+_qualifier_mult_words = "|".join(w for w in MULTIPLIERS.keys() if w.endswith("s"))
 
 # Pattern for inline numbers with optional currency, commas, decimals,
 # parenthesized negatives, and optional inline multiplier suffix.
@@ -42,33 +47,23 @@ INLINE_MULTIPLIERS = {
 #   4 - percent sign (if present, skip multiplier adjustment)
 #   5 - inline multiplier word
 NUMBER_PATTERN = re.compile(
-    r"(?<!\d[/\-])"                           # not preceded by digit+slash/dash (date guard)
-    r"(?<!\d\.)"                              # not preceded by digit+dot (version guard)
-    r"\$?\s*"                                 # optional currency prefix
     r"(\()?"                                  # group 1: open paren (negative)
     r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"  # group 2: number
     r"(\))?"                                  # group 3: close paren
     r"(?:"
     r"\s*(%)"                                 # group 4: percent sign
     r"|"
-    r"\s+(million|millions|billion|billions|thousand|thousands|trillion|trillions)"  # group 5: word multiplier (requires space)
+    rf"\s+({_inline_mult_words})"            # group 5: word multiplier (requires space)
     r"(?![a-zA-Z])"
     r")?"
 )
 
 # Section/table qualifier: "(in millions)", "($ in thousands)", etc.
 QUALIFIER_PATTERN = re.compile(
-    r"\(?\s*(\$|dollars?)?\s*(?:amounts\s+)?in\s+(thousands|millions|billions|trillions)"
+    rf"\(?\s*(\$|dollars?)?\s*(?:amounts\s+)?in\s+({_qualifier_mult_words})"
     r"(?:\s+of\s+dollars?)?\s*\)?",
     re.IGNORECASE,
 )
-
-QUALIFIER_WORD_TO_MULT = {
-    "thousands": 1_000,
-    "millions": 1_000_000,
-    "billions": 1_000_000_000,
-    "trillions": 1_000_000_000_000,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +99,7 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[str]]]:
             try:
                 raw_tables = page.extract_tables() or []
             except Exception:
+                # Catch any extraction errors (malformed tables, encoding issues, etc.)
                 raw_tables = []
             for table in raw_tables:
                 rows = []
@@ -140,7 +136,18 @@ def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
 # ---------------------------------------------------------------------------
 
 def get_context_snippet(text: str, start: int, end: int, window: int = 60) -> str:
-    """Extract a snippet of text around the match for display."""
+    """
+    Extract a snippet of text around the match for display.
+
+    Args:
+        text: The full text to extract from
+        start: Start position of the match
+        end: End position of the match
+        window: Number of characters to include before and after the match (default: 60)
+
+    Returns:
+        A context snippet with ellipsis indicators if text was truncated.
+    """
     ctx_start = max(0, start - window)
     ctx_end = min(len(text), end + window)
     snippet = text[ctx_start:ctx_end].replace("\n", " ").strip()
@@ -155,7 +162,7 @@ def resolve_inline_multiplier(suffix: str) -> tuple[float, str]:
     """Convert an inline multiplier suffix to (multiplier_value, label)."""
     if not suffix:
         return 1.0, ""
-    mult = INLINE_MULTIPLIERS.get(suffix)
+    mult = MULTIPLIERS.get(suffix)
     if mult:
         return float(mult), suffix
     return 1.0, ""
@@ -172,9 +179,20 @@ def extract_numbers(
     """
     Extract all candidate numbers from a text segment.
 
-    page_multiplier and page_mult_label are fallback qualifiers if qualifiers list is not provided.
-    is_dollar_scoped: if True, only apply the multiplier to numbers with decimals.
-    qualifiers: list of (position, multiplier, label, is_dollar_scoped) for positional lookup.
+    Args:
+        text: The text to search for numbers
+        page_num: Page number for tracking where the number was found
+        page_multiplier: Fallback multiplier if qualifiers list is not provided
+        page_mult_label: Fallback label if qualifiers list is not provided
+        is_dollar_scoped: If True, only apply the multiplier to numbers with decimals
+        qualifiers: List of tuples for positional lookup. Each tuple contains:
+            - position (int): Start index of the qualifier in the text
+            - multiplier (float): The multiplier value (e.g., 1000000 for "millions")
+            - label (str): The label string (e.g., "millions")
+            - is_dollar_scoped (bool): Whether this qualifier only applies to dollar amounts
+
+    Returns:
+        List of CandidateNumber objects found in the text.
     """
     candidates = []
 
@@ -246,7 +264,7 @@ def detect_all_qualifiers(text: str) -> list[tuple[int, float, str, bool]]:
     for match in QUALIFIER_PATTERN.finditer(text):
         dollar_indicator = match.group(1)
         word = match.group(2).lower()
-        mult = QUALIFIER_WORD_TO_MULT.get(word, 1.0)
+        mult = MULTIPLIERS.get(word, 1.0)
         is_dollar_scoped = bool(dollar_indicator) or "dollar" in match.group(0).lower()
         qualifiers.append((match.start(), float(mult), word, is_dollar_scoped))
     return qualifiers
@@ -318,7 +336,9 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
                 extract_numbers(table_text, page_num, t_mult, t_label, t_dollar)
             )
 
-        # Process body text with positional qualifiers to handle multiple sections
+        # Process body text with positional qualifiers to handle multiple sections.
+        # Positional lookup allows different sections of the same page to have
+        # different qualifiers (e.g., one table "in millions", another "in thousands").
         if body_text.strip():
             qualifiers = detect_all_qualifiers(body_text)
             all_candidates.extend(
