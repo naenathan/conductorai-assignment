@@ -17,10 +17,6 @@ from pathlib import Path
 import pdfplumber
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 # Single source of truth for multiplier words and their values
 MULTIPLIERS = {
     "thousand": 1_000,
@@ -33,19 +29,11 @@ MULTIPLIERS = {
     "trillions": 1_000_000_000_000,
 }
 
-# Build regex patterns dynamically from MULTIPLIERS
 _inline_mult_words = "|".join(MULTIPLIERS.keys())
 _qualifier_mult_words = "|".join(w for w in MULTIPLIERS.keys() if w.endswith("s"))
 
 # Pattern for inline numbers with optional currency, commas, decimals,
 # parenthesized negatives, and optional inline multiplier suffix.
-#
-# Groups:
-#   1 - open paren (negative indicator)
-#   2 - the numeric part (digits, commas, optional decimal)
-#   3 - close paren
-#   4 - percent sign (if present, skip multiplier adjustment)
-#   5 - inline multiplier word
 NUMBER_PATTERN = re.compile(
     r"(\()?"                                  # group 1: open paren (negative)
     r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"  # group 2: number
@@ -58,17 +46,12 @@ NUMBER_PATTERN = re.compile(
     r")?"
 )
 
-# Section/table qualifier: "(in millions)", "($ in thousands)", etc.
 QUALIFIER_PATTERN = re.compile(
     rf"\(?\s*(\$|dollars?)?\s*(?:amounts\s+)?in\s+({_qualifier_mult_words})"
     r"(?:\s+of\s+dollars?)?\s*\)?",
     re.IGNORECASE,
 )
 
-
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
 
 @dataclass
 class CandidateNumber:
@@ -78,10 +61,6 @@ class CandidateNumber:
     page: int = 0
     context: str = ""  # surrounding text snippet
 
-
-# ---------------------------------------------------------------------------
-# Text Extraction
-# ---------------------------------------------------------------------------
 
 def extract_pages(pdf_path: str) -> list[tuple[int, str, list[str]]]:
     """
@@ -99,7 +78,6 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str, list[str]]]:
             try:
                 raw_tables = page.extract_tables() or []
             except Exception:
-                # Catch any extraction errors (malformed tables, encoding issues, etc.)
                 raw_tables = []
             for table in raw_tables:
                 rows = []
@@ -130,10 +108,6 @@ def try_fitz_fallback(pdf_path: str, page_numbers: list[int]) -> dict[int, str]:
         pass
     return results
 
-
-# ---------------------------------------------------------------------------
-# Number Extraction
-# ---------------------------------------------------------------------------
 
 def get_context_snippet(text: str, start: int, end: int, window: int = 60) -> str:
     """
@@ -251,10 +225,6 @@ def extract_numbers(
     return candidates
 
 
-# ---------------------------------------------------------------------------
-# Qualifier Detection
-# ---------------------------------------------------------------------------
-
 def detect_all_qualifiers(text: str) -> list[tuple[int, float, str, bool]]:
     """
     Find all qualifiers in text and return (position, multiplier, label, is_dollar_scoped).
@@ -303,10 +273,6 @@ def detect_page_qualifier(text: str) -> tuple[float, str, bool]:
     return 1.0, "", False
 
 
-# ---------------------------------------------------------------------------
-# Main Pipeline
-# ---------------------------------------------------------------------------
-
 def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, CandidateNumber | None]:
     """
     Main pipeline: extract → parse → qualify → find max.
@@ -336,9 +302,6 @@ def find_largest_numbers(pdf_path: str) -> tuple[CandidateNumber | None, Candida
                 extract_numbers(table_text, page_num, t_mult, t_label, t_dollar)
             )
 
-        # Process body text with positional qualifiers to handle multiple sections.
-        # Positional lookup allows different sections of the same page to have
-        # different qualifiers (e.g., one table "in millions", another "in thousands").
         if body_text.strip():
             qualifiers = detect_all_qualifiers(body_text)
             all_candidates.extend(
